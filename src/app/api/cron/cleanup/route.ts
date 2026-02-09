@@ -1,51 +1,44 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getServiceClient } from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import { supabase } from '@/lib/supabase';
 
-// Verify cron secret (optional security)
-const CRON_SECRET = process.env.CRON_SECRET;
+// Helper: Calculate date N days ago
+function getPastDate(daysAgo: number): string {
+    const date = new Date();
+    date.setDate(date.getDate() - daysAgo);
+    return date.toISOString().split('T')[0];
+}
 
-export async function GET(request: NextRequest) {
+export async function GET() {
     try {
-        // Optional: Verify cron authorization
-        if (CRON_SECRET) {
-            const authHeader = request.headers.get('authorization');
-            if (authHeader !== `Bearer ${CRON_SECRET}`) {
-                return NextResponse.json(
-                    { error: 'Unauthorized' },
-                    { status: 401 }
-                );
-            }
-        }
+        // 1. Calculate cutoff date (30 days ago)
+        const cutoffDate = getPastDate(30);
 
-        // Use service client for admin operations
-        const supabase = getServiceClient();
-
-        // Delete records older than 30 days
-        const thirtyDaysAgo = new Date();
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-        const cutoffDate = thirtyDaysAgo.toISOString().split('T')[0];
-
-        const { error, count } = await supabase
+        // 2. Perform delete
+        // Fix: .select() after .delete() in Supabase v2 only accepts columns string, not options object
+        const { data, error } = await supabase
             .from('lottery_results')
             .delete()
             .lt('draw_date', cutoffDate)
-            .select('*', { count: 'exact', head: true });
+            .select('id'); // Only select ID to be lightweight
 
         if (error) {
             console.error('Cleanup error:', error);
             return NextResponse.json(
-                { error: 'Cleanup failed', details: error.message },
+                { error: 'Failed to cleanup old data' },
                 { status: 500 }
             );
         }
 
+        const deletedCount = data ? data.length : 0;
+
         return NextResponse.json({
             success: true,
-            message: `Cleanup completed. ${count || 0} records deleted.`,
-            cutoff_date: cutoffDate,
+            message: `Deleted ${deletedCount} records older than ${cutoffDate}`,
+            deleted_count: deletedCount
         });
+
     } catch (error) {
-        console.error('Cron cleanup error:', error);
+        console.error('Cron job error:', error);
         return NextResponse.json(
             { error: 'Internal server error' },
             { status: 500 }
