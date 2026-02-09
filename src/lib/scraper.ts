@@ -15,7 +15,7 @@ function getRandomUserAgent(): string {
 }
 
 // Timeout configuration
-const SCRAPE_TIMEOUT_MS = 6000;
+const SCRAPE_TIMEOUT_MS = 30000;
 
 // Scraper sources
 const SOURCES = {
@@ -49,20 +49,26 @@ function createTimeout(ms: number): Promise<never> {
  * Fetch HTML with User-Agent rotation
  */
 async function fetchWithRotation(url: string): Promise<string> {
-    const response = await fetch(url, {
-        headers: {
-            'User-Agent': getRandomUserAgent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
-            'Cache-Control': 'no-cache',
-        },
-    });
+    try {
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': getRandomUserAgent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+                'Cache-Control': 'no-cache',
+            },
+        });
 
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        return response.text();
+    } catch (error: any) {
+        console.error(`Fetch error for ${url}: ${error.message}`);
+        if (error.cause) console.error('Cause:', error.cause);
+        throw error;
     }
-
-    return response.text();
 }
 
 /**
@@ -152,45 +158,117 @@ function parseTableResults(
 }
 
 /**
+ * Remove accents and special characters
+ */
+function removeAccents(str: string): string {
+    return str.normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd').replace(/Đ/g, 'D')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .trim();
+}
+
+/**
+ * Map station codes to potential names on MinhNgoc
+ */
+const STATION_NAME_MAP: Record<string, string[]> = {
+    'TP.HCM': ['tp.hcm', 'ho chi minh', 'hcm'],
+    'DT': ['dong thap'],
+    'CM': ['ca mau'],
+    'TG': ['tien giang'],
+    'KG': ['kien giang'],
+    'DL': ['da lat'],
+    'VT': ['vung tau'],
+    'BL': ['bac lieu'],
+    'BT': ['ben tre'],
+    'DN': ['dong nai'],
+    'CT': ['can tho'],
+    'ST': ['soc trang'],
+    'TN': ['tay ninh'],
+    'AG': ['an giang'],
+    'BTH': ['binh thuan'],
+    'BD': ['binh duong'],
+    'TV': ['tra vinh'],
+    'VL': ['vinh long'],
+    'BP': ['binh phuoc'],
+    'HG': ['hau giang'],
+    'LA': ['long an']
+};
+
+/**
  * Parse lottery results from minhngoc.net HTML structure (fallback)
  */
 function parseMinhNgoc($: any, stationCode: string, drawDate: string): LotteryResult[] {
     const results: LotteryResult[] = [];
 
-    // minhngoc uses different structure - adapt as needed
-    $('table.bkqmiennam tr, .box_kqxs tr').each((_: number, row: any) => {
-        const $row = $(row);
-        const cells = $row.find('td');
+    // Find all rightcl tables (single station tables)
+    const tables = $('table.rightcl');
 
-        if (cells.length >= 2) {
-            const labelCell = $(cells[0]).text().toLowerCase();
-            const valueCell = $(cells[1]);
+    tables.each((_: number, table: any) => {
+        const $table = $(table);
+        const stationNameRaw = $table.find('td.tinh').text();
+        const stationName = removeAccents(stationNameRaw);
 
-            let prizeType: string | null = null;
+        // Check if this table belongs to the requested station
+        let isMatch = false;
 
-            // Similar mapping logic
-            if (labelCell.includes('đb')) prizeType = 'special';
-            else if (labelCell.includes('g.1') || labelCell.includes('nhất')) prizeType = 'first';
-            else if (labelCell.includes('g.2') || labelCell.includes('nhì')) prizeType = 'second';
-            else if (labelCell.includes('g.3') || labelCell.includes('ba')) prizeType = 'third';
-            else if (labelCell.includes('g.4') || labelCell.includes('tư')) prizeType = 'fourth';
-            else if (labelCell.includes('g.5') || labelCell.includes('năm')) prizeType = 'fifth';
-            else if (labelCell.includes('g.6') || labelCell.includes('sáu')) prizeType = 'sixth';
-            else if (labelCell.includes('g.7') || labelCell.includes('bảy')) prizeType = 'seventh';
-            else if (labelCell.includes('g.8') || labelCell.includes('tám')) prizeType = 'eighth';
+        // Direct match with code
+        if (stationName.includes(removeAccents(stationCode))) {
+            isMatch = true;
+        }
+        // Match via map
+        else if (STATION_NAME_MAP[stationCode]) {
+            if (STATION_NAME_MAP[stationCode].some(name => stationName.includes(name))) {
+                isMatch = true;
+            }
+        }
 
-            if (prizeType) {
-                const values = valueCell.text().split(/[-–,\s]+/).map((v: string) => v.trim().replace(/\D/g, '')).filter((v: string) => v.length >= 2);
-                values.forEach((value: string, order: number) => {
+        if (isMatch) {
+            // Map class names to prize types
+            const prizes = [
+                { selector: '.giaidb', type: 'special' },
+                { selector: '.giai1', type: 'first' },
+                { selector: '.giai2', type: 'second' },
+                { selector: '.giai3', type: 'third' },
+                { selector: '.giai4', type: 'fourth' },
+                { selector: '.giai5', type: 'fifth' },
+                { selector: '.giai6', type: 'sixth' },
+                { selector: '.giai7', type: 'seventh' },
+                { selector: '.giai8', type: 'eighth' }
+            ];
+
+            prizes.forEach(({ selector, type }) => {
+                // Sometimes values are directly in td or in div
+                let values: string[] = [];
+
+                // Better approach: Select the TD, then find DIVs or take text
+                const $td = $table.find(`td${selector}`).first();
+                const $divs = $td.find('div');
+
+                if ($divs.length > 0) {
+                    $divs.each((_: number, div: any) => {
+                        const v = $(div).text().trim().replace(/\D/g, '');
+                        if (v.length >= 2) values.push(v);
+                    });
+                } else {
+                    const v = $td.text().trim().replace(/\D/g, '');
+                    if (v.length >= 2) values.push(v);
+                }
+
+                // Deduplicate values just in case
+                values = Array.from(new Set(values));
+
+                values.forEach((value, order) => {
                     results.push({
                         station_code: stationCode,
                         draw_date: drawDate,
-                        prize_type: prizeType as LotteryResult['prize_type'],
+                        prize_type: type as LotteryResult['prize_type'],
                         prize_order: order,
                         prize_value: value,
                     });
                 });
-            }
+            });
         }
     });
 
@@ -207,6 +285,7 @@ async function scrapeLotteryResults(stationCode: string, drawDate: string): Prom
 
     // Try primary source first
     try {
+        console.log(`Fetching primary: ${SOURCES.primary(formattedDate)}`);
         const html = await fetchWithRotation(SOURCES.primary(formattedDate));
         const $ = cheerio.load(html);
         const results = parseXosoMe($, stationCode, drawDate);
@@ -220,6 +299,7 @@ async function scrapeLotteryResults(stationCode: string, drawDate: string): Prom
 
     // Try fallback source
     try {
+        console.log(`Fetching fallback: ${SOURCES.fallback(formattedDate)}`);
         const html = await fetchWithRotation(SOURCES.fallback(formattedDate));
         const $ = cheerio.load(html);
         const results = parseMinhNgoc($, stationCode, drawDate);
@@ -227,11 +307,12 @@ async function scrapeLotteryResults(stationCode: string, drawDate: string): Prom
         if (results.length > 0) {
             return results;
         }
+        console.warn('Fallback source returned 0 results');
     } catch (error) {
         console.error('Fallback source also failed', error);
     }
 
-    throw { code: ERROR_CODES.SCRAPE_FAILED };
+    throw { code: ERROR_CODES.SCRAPE_FAILED, message: 'Both sources failed' };
 }
 
 /**

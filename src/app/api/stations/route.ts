@@ -1,55 +1,59 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { Station } from '@/lib/types';
+import { getVietnamDayOfWeek, isValidDate } from '@/lib/date-utils';
 
 export async function GET(request: NextRequest) {
-    // Parse URL params outside try-catch to be available in catch block
+    // Parse URL params
     const { searchParams } = new URL(request.url);
     const dayParam = searchParams.get('day');
+    const dateParam = searchParams.get('date'); // YYYY-MM-DD
 
     try {
-        // Check if Supabase keys are configured
+        // Mock data fallback if Supabase keys missing
         if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
             console.warn('Supabase credential missing. Returning mock data.');
-            return NextResponse.json(getMockStations(dayParam));
+            return NextResponse.json(getMockStations(dateParam ? getVietnamDayOfWeek(dateParam) : (dayParam ? parseInt(dayParam) : null)));
         }
 
-        // If day is provided, filter by day of week
         let query = supabase
             .from('stations')
             .select('*')
             .eq('is_active', true)
             .order('name');
 
-        if (dayParam !== null) {
+        // Filter by day
+        let targetDay: number | null = null;
+
+        if (dateParam && isValidDate(dateParam)) {
+            targetDay = getVietnamDayOfWeek(dateParam);
+        } else if (dayParam !== null) {
             const day = parseInt(dayParam, 10);
-            if (isNaN(day) || day < 0 || day > 6) {
-                return NextResponse.json(
-                    { error: 'Invalid day parameter. Must be 0-6.' },
-                    { status: 400 }
-                );
+            if (!isNaN(day) && day >= 0 && day <= 6) {
+                targetDay = day;
             }
-            query = query.eq('draw_day', day);
+        }
+
+        if (targetDay !== null) {
+            query = query.eq('draw_day', targetDay);
         }
 
         const { data: stations, error } = await query;
 
         if (error) {
             console.error('Database error:', error);
-            // Fallback to mock data on DB error
-            return NextResponse.json(getMockStations(dayParam));
+            return NextResponse.json(getMockStations(targetDay));
         }
 
         return NextResponse.json<Station[]>(stations || []);
     } catch (error) {
         console.error('Stations API error:', error);
-        // Fallback to mock data on server error
-        return NextResponse.json(getMockStations(searchParams.get('day')));
+        return NextResponse.json(getMockStations(null));
     }
 }
 
 // Mock data helper
-function getMockStations(dayParam: string | null): Station[] {
+function getMockStations(dayParam: number | null): Station[] {
     const allStations: Station[] = [
         { id: 1, code: 'TG', name: 'Tiền Giang', short_name: 'Tiền Giang', draw_day: 0, region: 'MN', is_active: true, created_at: '' },
         { id: 2, code: 'KG', name: 'Kiên Giang', short_name: 'Kiên Giang', draw_day: 0, region: 'MN', is_active: true, created_at: '' },
@@ -76,8 +80,7 @@ function getMockStations(dayParam: string | null): Station[] {
     ];
 
     if (dayParam !== null) {
-        const day = parseInt(dayParam, 10);
-        return allStations.filter(s => s.draw_day === day);
+        return allStations.filter(s => s.draw_day === dayParam);
     }
     return allStations;
 }

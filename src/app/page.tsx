@@ -46,9 +46,7 @@ export default function Home() {
             setStationsLoading(true);
             try {
                 const date = new Date(selectedDate);
-                const dayOfWeek = date.getDay(); // 0=Sunday, 6=Saturday
-
-                const response = await fetch(`/api/stations?day=${dayOfWeek}`);
+                const response = await fetch(`/api/stations?date=${selectedDate}`);
                 if (response.ok) {
                     const data: Station[] = await response.json();
                     setStations(data);
