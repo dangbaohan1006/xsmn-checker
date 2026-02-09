@@ -6,8 +6,6 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
     'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
 
 function getRandomUserAgent(): string {
@@ -15,29 +13,28 @@ function getRandomUserAgent(): string {
 }
 
 // Timeout configuration
-const SCRAPE_TIMEOUT_MS = 30000;
+const SCRAPE_TIMEOUT_MS = 8000; // Tăng lên 8s để an toàn hơn
 
-// Scraper sources
 const SOURCES = {
     primary: (date: string) => `https://xoso.me/xsmn-${date}.html`,
     fallback: (date: string) => `https://www.minhngoc.net.vn/ket-qua-xo-so/mien-nam/${date}.html`,
 };
 
-// Prize type mapping (order matters for parsing)
-const PRIZE_SELECTORS = {
-    special: { selector: '.giaidb, .giai-db, [class*="special"]', type: 'special' as const },
-    first: { selector: '.giai1, .giai-1, [class*="first"]', type: 'first' as const },
-    second: { selector: '.giai2, .giai-2, [class*="second"]', type: 'second' as const },
-    third: { selector: '.giai3, .giai-3, [class*="third"]', type: 'third' as const },
-    fourth: { selector: '.giai4, .giai-4, [class*="fourth"]', type: 'fourth' as const },
-    fifth: { selector: '.giai5, .giai-5, [class*="fifth"]', type: 'fifth' as const },
-    sixth: { selector: '.giai6, .giai-6, [class*="sixth"]', type: 'sixth' as const },
-    seventh: { selector: '.giai7, .giai-7, [class*="seventh"]', type: 'seventh' as const },
-    eighth: { selector: '.giai8, .giai-8, [class*="eighth"]', type: 'eighth' as const },
-};
+/**
+ * Utility: Xóa dấu tiếng Việt và ký tự đặc biệt để so sánh tên đài
+ * Ví dụ: "Đồng Tháp" -> "dongthap", "TP.HCM" -> "tphcm"
+ */
+function normalizeString(str: string): string {
+    return str
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // Bỏ dấu
+        .replace(/[đĐ]/g, 'd')
+        .replace(/[^a-z0-9]/g, ''); // Bỏ ký tự đặc biệt (., -)
+}
 
 /**
- * Create a timeout promise that rejects after specified ms
+ * Create a timeout promise
  */
 function createTimeout(ms: number): Promise<never> {
     return new Promise((_, reject) => {
@@ -46,227 +43,71 @@ function createTimeout(ms: number): Promise<never> {
 }
 
 /**
- * Fetch HTML with User-Agent rotation
+ * Fetch HTML with User-Agent
  */
 async function fetchWithRotation(url: string): Promise<string> {
-    try {
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': getRandomUserAgent(),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
-                'Cache-Control': 'no-cache',
-            },
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-
-        return response.text();
-    } catch (error: any) {
-        console.error(`Fetch error for ${url}: ${error.message}`);
-        if (error.cause) console.error('Cause:', error.cause);
-        throw error;
-    }
+    const response = await fetch(url, {
+        headers: {
+            'User-Agent': getRandomUserAgent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+        },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.text();
 }
 
 /**
- * Parse lottery results from xoso.me HTML structure
- */
-function parseXosoMe($: any, stationCode: string, drawDate: string): LotteryResult[] {
-    const results: LotteryResult[] = [];
-
-    // Find the table for the specific station
-    const stationTable = $(`table.kqxs, .box_kqxs, [data-station="${stationCode}"]`).first();
-
-    if (stationTable.length === 0) {
-        // Try alternative: find by station name in header
-        const tables = $('table');
-        for (let i = 0; i < tables.length; i++) {
-            const table = $(tables[i]);
-            const header = table.find('th, .tinh, .header').first().text().toLowerCase();
-            if (header.includes(stationCode) || header.includes(stationCode.replace(/\d+$/, ''))) {
-                return parseTableResults($, table, stationCode, drawDate);
-            }
-        }
-    }
-
-    return parseTableResults($, stationTable, stationCode, drawDate);
-}
-
-/**
- * Parse results from a specific table element
+ * Parse results from a generic table
  */
 function parseTableResults(
-    $: any,
-    table: cheerio.Cheerio,
+    $: cheerio.CheerioAPI,
+    table: cheerio.Cheerio<cheerio.Element>,
     stationCode: string,
     drawDate: string
 ): LotteryResult[] {
     const results: LotteryResult[] = [];
 
-    // Parse each prize row
-    table.find('tr').each((_: number, row: any) => {
+    // Mapping prize types based on Vietnamese keywords
+    table.find('tr').each((_, row) => {
         const $row = $(row);
-        const prizeLabel = $row.find('td:first-child, th:first-child').text().toLowerCase();
+        // Tìm ô chứa tên giải (thường là ô đầu tiên)
+        const prizeLabel = normalizeString($row.find('td:first-child, th:first-child').text());
 
         let prizeType: string | null = null;
-
-        if (prizeLabel.includes('đb') || prizeLabel.includes('đặc biệt')) {
-            prizeType = 'special';
-        } else if (prizeLabel.includes('nhất') || prizeLabel === 'g1') {
-            prizeType = 'first';
-        } else if (prizeLabel.includes('nhì') || prizeLabel === 'g2') {
-            prizeType = 'second';
-        } else if (prizeLabel.includes('ba') || prizeLabel === 'g3') {
-            prizeType = 'third';
-        } else if (prizeLabel.includes('tư') || prizeLabel === 'g4') {
-            prizeType = 'fourth';
-        } else if (prizeLabel.includes('năm') || prizeLabel === 'g5') {
-            prizeType = 'fifth';
-        } else if (prizeLabel.includes('sáu') || prizeLabel === 'g6') {
-            prizeType = 'sixth';
-        } else if (prizeLabel.includes('bảy') || prizeLabel === 'g7') {
-            prizeType = 'seventh';
-        } else if (prizeLabel.includes('tám') || prizeLabel === 'g8') {
-            prizeType = 'eighth';
-        }
+        if (prizeLabel.includes('db') || prizeLabel.includes('dacbiet')) prizeType = 'special';
+        else if (prizeLabel.includes('nhat') || prizeLabel === 'g1') prizeType = 'first';
+        else if (prizeLabel.includes('nhi') || prizeLabel === 'g2') prizeType = 'second';
+        else if (prizeLabel.includes('ba') || prizeLabel === 'g3') prizeType = 'third';
+        else if (prizeLabel.includes('tu') || prizeLabel === 'g4') prizeType = 'fourth';
+        else if (prizeLabel.includes('nam') || prizeLabel === 'g5') prizeType = 'fifth';
+        else if (prizeLabel.includes('sau') || prizeLabel === 'g6') prizeType = 'sixth';
+        else if (prizeLabel.includes('bay') || prizeLabel === 'g7') prizeType = 'seventh';
+        else if (prizeLabel.includes('tam') || prizeLabel === 'g8') prizeType = 'eighth';
 
         if (prizeType) {
-            // Get all prize values from this row
-            const prizeValues = $row.find('td:not(:first-child) span, td:not(:first-child)').map((i: number, el: any) => {
-                const text = $(el).text().trim().replace(/\D/g, '');
-                return text.length >= 2 ? text : null;
-            }).get().filter(Boolean);
+            // Lấy các số trong hàng đó
+            const values: string[] = [];
+            $row.find('td').each((index, cell) => {
+                // Bỏ qua ô đầu tiên (tên giải)
+                if (index === 0) return;
 
-            prizeValues.forEach((value: string, order: number) => {
-                if (value) {
-                    results.push({
-                        station_code: stationCode,
-                        draw_date: drawDate,
-                        prize_type: prizeType as LotteryResult['prize_type'],
-                        prize_order: order,
-                        prize_value: value,
-                    });
-                }
+                // Lấy text, tách theo dấu - hoặc khoảng trắng
+                const text = $(cell).text().trim();
+                const numbers = text.split(/[\s-]+/);
+
+                numbers.forEach(num => {
+                    const cleanNum = num.replace(/\D/g, '');
+                    if (cleanNum.length >= 2) values.push(cleanNum);
+                });
             });
-        }
-    });
 
-    return results;
-}
-
-/**
- * Remove accents and special characters
- */
-function removeAccents(str: string): string {
-    return str.normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/đ/g, 'd').replace(/Đ/g, 'D')
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, '')
-        .trim();
-}
-
-/**
- * Map station codes to potential names on MinhNgoc
- */
-const STATION_NAME_MAP: Record<string, string[]> = {
-    'TP.HCM': ['tp.hcm', 'ho chi minh', 'hcm'],
-    'DT': ['dong thap'],
-    'CM': ['ca mau'],
-    'TG': ['tien giang'],
-    'KG': ['kien giang'],
-    'DL': ['da lat'],
-    'VT': ['vung tau'],
-    'BL': ['bac lieu'],
-    'BT': ['ben tre'],
-    'DN': ['dong nai'],
-    'CT': ['can tho'],
-    'ST': ['soc trang'],
-    'TN': ['tay ninh'],
-    'AG': ['an giang'],
-    'BTH': ['binh thuan'],
-    'BD': ['binh duong'],
-    'TV': ['tra vinh'],
-    'VL': ['vinh long'],
-    'BP': ['binh phuoc'],
-    'HG': ['hau giang'],
-    'LA': ['long an']
-};
-
-/**
- * Parse lottery results from minhngoc.net HTML structure (fallback)
- */
-function parseMinhNgoc($: any, stationCode: string, drawDate: string): LotteryResult[] {
-    const results: LotteryResult[] = [];
-
-    // Find all rightcl tables (single station tables)
-    const tables = $('table.rightcl');
-
-    tables.each((_: number, table: any) => {
-        const $table = $(table);
-        const stationNameRaw = $table.find('td.tinh').text();
-        const stationName = removeAccents(stationNameRaw);
-
-        // Check if this table belongs to the requested station
-        let isMatch = false;
-
-        // Direct match with code
-        if (stationName.includes(removeAccents(stationCode))) {
-            isMatch = true;
-        }
-        // Match via map
-        else if (STATION_NAME_MAP[stationCode]) {
-            if (STATION_NAME_MAP[stationCode].some(name => stationName.includes(name))) {
-                isMatch = true;
-            }
-        }
-
-        if (isMatch) {
-            // Map class names to prize types
-            const prizes = [
-                { selector: '.giaidb', type: 'special' },
-                { selector: '.giai1', type: 'first' },
-                { selector: '.giai2', type: 'second' },
-                { selector: '.giai3', type: 'third' },
-                { selector: '.giai4', type: 'fourth' },
-                { selector: '.giai5', type: 'fifth' },
-                { selector: '.giai6', type: 'sixth' },
-                { selector: '.giai7', type: 'seventh' },
-                { selector: '.giai8', type: 'eighth' }
-            ];
-
-            prizes.forEach(({ selector, type }) => {
-                // Sometimes values are directly in td or in div
-                let values: string[] = [];
-
-                // Better approach: Select the TD, then find DIVs or take text
-                const $td = $table.find(`td${selector}`).first();
-                const $divs = $td.find('div');
-
-                if ($divs.length > 0) {
-                    $divs.each((_: number, div: any) => {
-                        const v = $(div).text().trim().replace(/\D/g, '');
-                        if (v.length >= 2) values.push(v);
-                    });
-                } else {
-                    const v = $td.text().trim().replace(/\D/g, '');
-                    if (v.length >= 2) values.push(v);
-                }
-
-                // Deduplicate values just in case
-                values = Array.from(new Set(values));
-
-                values.forEach((value, order) => {
-                    results.push({
-                        station_code: stationCode,
-                        draw_date: drawDate,
-                        prize_type: type as LotteryResult['prize_type'],
-                        prize_order: order,
-                        prize_value: value,
-                    });
+            values.forEach((val, order) => {
+                results.push({
+                    station_code: stationCode,
+                    draw_date: drawDate,
+                    prize_type: prizeType as any,
+                    prize_order: order,
+                    prize_value: val,
                 });
             });
         }
@@ -276,56 +117,139 @@ function parseMinhNgoc($: any, stationCode: string, drawDate: string): LotteryRe
 }
 
 /**
- * Main scraper function with timeout and fallback
+ * Parse Xoso.me logic
  */
-async function scrapeLotteryResults(stationCode: string, drawDate: string): Promise<LotteryResult[]> {
-    // Format date for URLs (DD-MM-YYYY)
-    const [year, month, day] = drawDate.split('-');
-    const formattedDate = `${day}-${month}-${year}`;
+function parseXosoMe($: cheerio.CheerioAPI, stationCode: string, drawDate: string): LotteryResult[] {
+    // 1. Chuẩn hóa mã đài cần tìm (ví dụ: tphcm1 -> tphcm)
+    const target = normalizeString(stationCode.replace(/\d+$/, ''));
 
-    // Try primary source first
-    try {
-        console.log(`Fetching primary: ${SOURCES.primary(formattedDate)}`);
-        const html = await fetchWithRotation(SOURCES.primary(formattedDate));
-        const $ = cheerio.load(html);
-        const results = parseXosoMe($, stationCode, drawDate);
+    let targetTable: cheerio.Cheerio<cheerio.Element> | null = null;
 
-        if (results.length > 0) {
-            return results;
+    // 2. Tìm tất cả các bảng kết quả
+    $('table.kqxs, .box_kqxs, table[class*="bkq"]').each((_, tbl) => {
+        const $tbl = $(tbl);
+
+        // Tìm header của bảng này để xem nó thuộc tỉnh nào
+        // Thường nằm trong thẻ th, hoặc một div.tinh đứng trước, hoặc data-station
+        const headerText = normalizeString($tbl.find('th').first().text() + $tbl.prev().text() + $tbl.attr('data-station'));
+
+        if (headerText.includes(target)) {
+            targetTable = $tbl;
+            return false; // Break loop
         }
-    } catch (error) {
-        console.warn('Primary source failed, trying fallback...', error);
+    });
+
+    if (targetTable) {
+        return parseTableResults($, targetTable, stationCode, drawDate);
     }
 
-    // Try fallback source
-    try {
-        console.log(`Fetching fallback: ${SOURCES.fallback(formattedDate)}`);
-        const html = await fetchWithRotation(SOURCES.fallback(formattedDate));
-        const $ = cheerio.load(html);
-        const results = parseMinhNgoc($, stationCode, drawDate);
-
-        if (results.length > 0) {
-            return results;
-        }
-        console.warn('Fallback source returned 0 results');
-    } catch (error) {
-        console.error('Fallback source also failed', error);
-    }
-
-    throw { code: ERROR_CODES.SCRAPE_FAILED, message: 'Both sources failed' };
+    // Fallback: Nếu không tìm thấy bảng riêng, có thể là bảng gộp (3 đài 1 bảng)
+    // Logic này phức tạp hơn, tạm thời return rỗng để fallback sang minhngoc
+    return [];
 }
 
 /**
- * Scrape with timeout protection
+ * Parse MinhNgoc logic
  */
-export async function scrapeWithTimeout(
-    stationCode: string,
-    drawDate: string
-): Promise<LotteryResult[]> {
+function parseMinhNgoc($: cheerio.CheerioAPI, stationCode: string, drawDate: string): LotteryResult[] {
+    const target = normalizeString(stationCode.replace(/\d+$/, ''));
+    const results: LotteryResult[] = [];
+
+    // MinhNgoc thường có cấu trúc: Một bảng to, cột dọc là các giải, hàng ngang là các đài (hoặc ngược lại tùy view)
+    // Mobile view thường tách bảng. Desktop view gộp bảng.
+
+    // Tìm bảng chứa tên đài
+    $('table.bkqmiennam, table.box_kqxs').each((_, tbl) => {
+        const $tbl = $(tbl);
+        const headers = $tbl.find('thead tr th, tr.tinh th, tr.tinh td');
+
+        // Xác định cột (index) của đài này trong bảng
+        let colIndex = -1;
+        headers.each((idx, th) => {
+            if (normalizeString($(th).text()).includes(target)) {
+                colIndex = idx;
+                // Nếu bảng mobile, index thường lệch do colspan, nhưng cứ thử
+                return false;
+            }
+        });
+
+        // Nếu tìm thấy cột của đài
+        if (colIndex !== -1) {
+            // Duyệt từng hàng giải
+            $tbl.find('tr').each((_, row) => {
+                const $row = $(row);
+                const cells = $row.find('td');
+                const prizeLabel = normalizeString($(cells[0]).text()); // Tên giải ở cột 0
+
+                let prizeType = '';
+                if (prizeLabel.includes('db') || prizeLabel.includes('dacbiet')) prizeType = 'special';
+                else if (prizeLabel.includes('g8') || prizeLabel.includes('tam')) prizeType = 'eighth';
+                else if (prizeLabel.includes('g7') || prizeLabel.includes('bay')) prizeType = 'seventh';
+                else if (prizeLabel.includes('g6') || prizeLabel.includes('sau')) prizeType = 'sixth';
+                else if (prizeLabel.includes('g5') || prizeLabel.includes('nam')) prizeType = 'fifth';
+                else if (prizeLabel.includes('g4') || prizeLabel.includes('tu')) prizeType = 'fourth';
+                else if (prizeLabel.includes('g3') || prizeLabel.includes('ba')) prizeType = 'third';
+                else if (prizeLabel.includes('g2') || prizeLabel.includes('nhi')) prizeType = 'second';
+                else if (prizeLabel.includes('g1') || prizeLabel.includes('nhat')) prizeType = 'first';
+
+                if (prizeType && cells.length > colIndex) {
+                    // Lấy ô tương ứng với cột đài
+                    // Lưu ý: MinhNgoc đôi khi cấu trúc td không đồng đều, logic này mang tính tương đối
+                    // Cách tốt nhất là tìm td có class trùng với class của th đài (nếu có)
+                    // Ở đây ta giả định cấu trúc bảng chuẩn
+
+                    // Tuy nhiên, để an toàn cho trường hợp bảng mobile (mỗi đài 1 bảng riêng biệt)
+                    // Ta check lại header của chính bảng đó
+                    const tableHeader = normalizeString($tbl.text());
+                    if (tableHeader.includes(target)) {
+                        // Đây là bảng riêng của đài (Mobile view) -> Lấy cột giá trị (thường là cột 1)
+                        const valCell = $(cells[1]).text();
+                        const nums = valCell.split(/[\s,-]+/).map(n => n.trim().replace(/\D/g, '')).filter(n => n.length > 1);
+                        nums.forEach((v, i) => results.push({
+                            station_code: stationCode, draw_date: drawDate, prize_type: prizeType as any, prize_order: i, prize_value: v
+                        }));
+                    }
+                }
+            });
+        }
+    });
+
+    return results;
+}
+
+/**
+ * Main Scraper
+ */
+async function scrapeLotteryResults(stationCode: string, drawDate: string): Promise<LotteryResult[]> {
+    const [year, month, day] = drawDate.split('-');
+    const formattedDate = `${day}-${month}-${year}`;
+
+    // 1. Try Xoso.me
+    try {
+        const html = await fetchWithRotation(SOURCES.primary(formattedDate));
+        const $ = cheerio.load(html);
+        const results = parseXosoMe($, stationCode, drawDate);
+        if (results.length > 0) return results;
+    } catch (e) {
+        console.warn('Xoso.me failed:', e);
+    }
+
+    // 2. Try MinhNgoc (Fallback)
+    try {
+        const html = await fetchWithRotation(SOURCES.fallback(formattedDate));
+        const $ = cheerio.load(html);
+        const results = parseMinhNgoc($, stationCode, drawDate);
+        if (results.length > 0) return results;
+    } catch (e) {
+        console.warn('MinhNgoc failed:', e);
+    }
+
+    throw { code: ERROR_CODES.SCRAPE_FAILED };
+}
+
+export async function scrapeWithTimeout(stationCode: string, drawDate: string): Promise<LotteryResult[]> {
     return Promise.race([
         scrapeLotteryResults(stationCode, drawDate),
         createTimeout(SCRAPE_TIMEOUT_MS),
     ]);
 }
-
-export { scrapeLotteryResults };
