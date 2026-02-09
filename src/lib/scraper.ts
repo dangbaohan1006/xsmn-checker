@@ -13,7 +13,7 @@ function getRandomUserAgent(): string {
 }
 
 // Timeout configuration
-const SCRAPE_TIMEOUT_MS = 8000; // Tăng lên 8s để an toàn hơn
+const SCRAPE_TIMEOUT_MS = 8000;
 
 const SOURCES = {
     primary: (date: string) => `https://xoso.me/xsmn-${date}.html`,
@@ -22,15 +22,15 @@ const SOURCES = {
 
 /**
  * Utility: Xóa dấu tiếng Việt và ký tự đặc biệt để so sánh tên đài
- * Ví dụ: "Đồng Tháp" -> "dongthap", "TP.HCM" -> "tphcm"
  */
 function normalizeString(str: string): string {
+    if (!str) return '';
     return str
         .toLowerCase()
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '') // Bỏ dấu
         .replace(/[đĐ]/g, 'd')
-        .replace(/[^a-z0-9]/g, ''); // Bỏ ký tự đặc biệt (., -)
+        .replace(/[^a-z0-9]/g, ''); // Bỏ ký tự đặc biệt
 }
 
 /**
@@ -67,10 +67,8 @@ function parseTableResults(
 ): LotteryResult[] {
     const results: LotteryResult[] = [];
 
-    // Mapping prize types based on Vietnamese keywords
     table.find('tr').each((_, row) => {
         const $row = $(row);
-        // Tìm ô chứa tên giải (thường là ô đầu tiên)
         const prizeLabel = normalizeString($row.find('td:first-child, th:first-child').text());
 
         let prizeType: string | null = null;
@@ -85,13 +83,9 @@ function parseTableResults(
         else if (prizeLabel.includes('tam') || prizeLabel === 'g8') prizeType = 'eighth';
 
         if (prizeType) {
-            // Lấy các số trong hàng đó
             const values: string[] = [];
             $row.find('td').each((index, cell) => {
-                // Bỏ qua ô đầu tiên (tên giải)
                 if (index === 0) return;
-
-                // Lấy text, tách theo dấu - hoặc khoảng trắng
                 const text = $(cell).text().trim();
                 const numbers = text.split(/[\s-]+/);
 
@@ -120,31 +114,22 @@ function parseTableResults(
  * Parse Xoso.me logic
  */
 function parseXosoMe($: cheerio.CheerioAPI, stationCode: string, drawDate: string): LotteryResult[] {
-    // 1. Chuẩn hóa mã đài cần tìm (ví dụ: tphcm1 -> tphcm)
     const target = normalizeString(stationCode.replace(/\d+$/, ''));
-
     let targetTable: cheerio.Cheerio<cheerio.Element> | null = null;
 
-    // 2. Tìm tất cả các bảng kết quả
     $('table.kqxs, .box_kqxs, table[class*="bkq"]').each((_, tbl) => {
         const $tbl = $(tbl);
-
-        // Tìm header của bảng này để xem nó thuộc tỉnh nào
-        // Thường nằm trong thẻ th, hoặc một div.tinh đứng trước, hoặc data-station
         const headerText = normalizeString($tbl.find('th').first().text() + $tbl.prev().text() + $tbl.attr('data-station'));
 
         if (headerText.includes(target)) {
             targetTable = $tbl;
-            return false; // Break loop
+            return false;
         }
     });
 
     if (targetTable) {
         return parseTableResults($, targetTable, stationCode, drawDate);
     }
-
-    // Fallback: Nếu không tìm thấy bảng riêng, có thể là bảng gộp (3 đài 1 bảng)
-    // Logic này phức tạp hơn, tạm thời return rỗng để fallback sang minhngoc
     return [];
 }
 
@@ -155,31 +140,27 @@ function parseMinhNgoc($: cheerio.CheerioAPI, stationCode: string, drawDate: str
     const target = normalizeString(stationCode.replace(/\d+$/, ''));
     const results: LotteryResult[] = [];
 
-    // MinhNgoc thường có cấu trúc: Một bảng to, cột dọc là các giải, hàng ngang là các đài (hoặc ngược lại tùy view)
-    // Mobile view thường tách bảng. Desktop view gộp bảng.
-
-    // Tìm bảng chứa tên đài
     $('table.bkqmiennam, table.box_kqxs').each((_, tbl) => {
         const $tbl = $(tbl);
         const headers = $tbl.find('thead tr th, tr.tinh th, tr.tinh td');
 
-        // Xác định cột (index) của đài này trong bảng
         let colIndex = -1;
         headers.each((idx, th) => {
             if (normalizeString($(th).text()).includes(target)) {
                 colIndex = idx;
-                // Nếu bảng mobile, index thường lệch do colspan, nhưng cứ thử
                 return false;
             }
         });
 
-        // Nếu tìm thấy cột của đài
         if (colIndex !== -1) {
-            // Duyệt từng hàng giải
             $tbl.find('tr').each((_, row) => {
                 const $row = $(row);
                 const cells = $row.find('td');
-                const prizeLabel = normalizeString($(cells[0]).text()); // Tên giải ở cột 0
+
+                // Safety check: cells[0] might not exist
+                if (cells.length === 0) return;
+
+                const prizeLabel = normalizeString($(cells[0]).text());
 
                 let prizeType = '';
                 if (prizeLabel.includes('db') || prizeLabel.includes('dacbiet')) prizeType = 'special';
@@ -193,21 +174,17 @@ function parseMinhNgoc($: cheerio.CheerioAPI, stationCode: string, drawDate: str
                 else if (prizeLabel.includes('g1') || prizeLabel.includes('nhat')) prizeType = 'first';
 
                 if (prizeType && cells.length > colIndex) {
-                    // Lấy ô tương ứng với cột đài
-                    // Lưu ý: MinhNgoc đôi khi cấu trúc td không đồng đều, logic này mang tính tương đối
-                    // Cách tốt nhất là tìm td có class trùng với class của th đài (nếu có)
-                    // Ở đây ta giả định cấu trúc bảng chuẩn
-
-                    // Tuy nhiên, để an toàn cho trường hợp bảng mobile (mỗi đài 1 bảng riêng biệt)
-                    // Ta check lại header của chính bảng đó
                     const tableHeader = normalizeString($tbl.text());
+                    // Logic xử lý bảng MinhNgoc mobile/desktop
                     if (tableHeader.includes(target)) {
-                        // Đây là bảng riêng của đài (Mobile view) -> Lấy cột giá trị (thường là cột 1)
-                        const valCell = $(cells[1]).text();
-                        const nums = valCell.split(/[\s,-]+/).map(n => n.trim().replace(/\D/g, '')).filter(n => n.length > 1);
-                        nums.forEach((v, i) => results.push({
-                            station_code: stationCode, draw_date: drawDate, prize_type: prizeType as any, prize_order: i, prize_value: v
-                        }));
+                        // Lấy dữ liệu an toàn
+                        const cellContent = $(cells[1]).text();
+                        if (cellContent) {
+                            const nums = cellContent.split(/[\s,-]+/).map(n => n.trim().replace(/\D/g, '')).filter(n => n.length > 1);
+                            nums.forEach((v, i) => results.push({
+                                station_code: stationCode, draw_date: drawDate, prize_type: prizeType as any, prize_order: i, prize_value: v
+                            }));
+                        }
                     }
                 }
             });
@@ -218,13 +195,12 @@ function parseMinhNgoc($: cheerio.CheerioAPI, stationCode: string, drawDate: str
 }
 
 /**
- * Main Scraper
+ * Main Scraper - ĐÃ THÊM EXPORT
  */
-async function scrapeLotteryResults(stationCode: string, drawDate: string): Promise<LotteryResult[]> {
+export async function scrapeLotteryResults(stationCode: string, drawDate: string): Promise<LotteryResult[]> {
     const [year, month, day] = drawDate.split('-');
     const formattedDate = `${day}-${month}-${year}`;
 
-    // 1. Try Xoso.me
     try {
         const html = await fetchWithRotation(SOURCES.primary(formattedDate));
         const $ = cheerio.load(html);
@@ -234,7 +210,6 @@ async function scrapeLotteryResults(stationCode: string, drawDate: string): Prom
         console.warn('Xoso.me failed:', e);
     }
 
-    // 2. Try MinhNgoc (Fallback)
     try {
         const html = await fetchWithRotation(SOURCES.fallback(formattedDate));
         const $ = cheerio.load(html);
