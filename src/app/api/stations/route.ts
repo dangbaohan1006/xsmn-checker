@@ -3,10 +3,11 @@ import { supabase } from '@/lib/supabase';
 import { Station } from '@/lib/types';
 
 export async function GET(request: NextRequest) {
-    try {
-        const { searchParams } = new URL(request.url);
-        const dayParam = searchParams.get('day');
+    // Parse URL params outside try-catch to be available in catch block
+    const { searchParams } = new URL(request.url);
+    const dayParam = searchParams.get('day');
 
+    try {
         // Check if Supabase keys are configured
         if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
             console.warn('Supabase credential missing. Returning mock data.');

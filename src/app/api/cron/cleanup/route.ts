@@ -1,44 +1,44 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { Station } from '@/lib/types';
 
-// Helper: Calculate date N days ago
-function getPastDate(daysAgo: number): string {
-    const date = new Date();
-    date.setDate(date.getDate() - daysAgo);
-    return date.toISOString().split('T')[0];
-}
+export async function GET(request: NextRequest) {
+    // 1. Parse URL ngay đầu hàm để tránh lỗi scope
+    const { searchParams } = new URL(request.url);
+    const dayParam = searchParams.get('day');
 
-export async function GET() {
     try {
-        // 1. Calculate cutoff date (30 days ago)
-        const cutoffDate = getPastDate(30);
+        let query = supabase
+            .from('stations')
+            .select('*')
+            .eq('is_active', true)
+            .order('name');
 
-        // 2. Perform delete
-        // Fix: .select() after .delete() in Supabase v2 only accepts columns string, not options object
-        const { data, error } = await supabase
-            .from('lottery_results')
-            .delete()
-            .lt('draw_date', cutoffDate)
-            .select('id'); // Only select ID to be lightweight
+        // 2. Validate và Filter
+        if (dayParam !== null) {
+            const day = parseInt(dayParam, 10);
+            if (isNaN(day) || day < 0 || day > 6) {
+                return NextResponse.json(
+                    { error: 'Invalid day parameter. Must be 0-6.' },
+                    { status: 400 }
+                );
+            }
+            query = query.eq('draw_day', day);
+        }
+
+        const { data: stations, error } = await query;
 
         if (error) {
-            console.error('Cleanup error:', error);
+            console.error('Database error:', error);
             return NextResponse.json(
-                { error: 'Failed to cleanup old data' },
+                { error: 'Failed to fetch stations' },
                 { status: 500 }
             );
         }
 
-        const deletedCount = data ? data.length : 0;
-
-        return NextResponse.json({
-            success: true,
-            message: `Deleted ${deletedCount} records older than ${cutoffDate}`,
-            deleted_count: deletedCount
-        });
-
+        return NextResponse.json<Station[]>(stations || []);
     } catch (error) {
-        console.error('Cron job error:', error);
+        console.error('Stations API error:', error);
         return NextResponse.json(
             { error: 'Internal server error' },
             { status: 500 }
