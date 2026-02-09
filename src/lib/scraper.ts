@@ -68,7 +68,7 @@ async function fetchWithRotation(url: string): Promise<string> {
 /**
  * Parse lottery results from xoso.me HTML structure
  */
-function parseXosoMe($: cheerio.CheerioAPI, stationCode: string, drawDate: string): LotteryResult[] {
+function parseXosoMe($: any, stationCode: string, drawDate: string): LotteryResult[] {
     const results: LotteryResult[] = [];
 
     // Find the table for the specific station
@@ -93,15 +93,15 @@ function parseXosoMe($: cheerio.CheerioAPI, stationCode: string, drawDate: strin
  * Parse results from a specific table element
  */
 function parseTableResults(
-    $: cheerio.CheerioAPI,
-    table: cheerio.Cheerio<cheerio.Element>,
+    $: any,
+    table: cheerio.Cheerio,
     stationCode: string,
     drawDate: string
 ): LotteryResult[] {
     const results: LotteryResult[] = [];
 
     // Parse each prize row
-    table.find('tr').each((_, row) => {
+    table.find('tr').each((_: number, row: any) => {
         const $row = $(row);
         const prizeLabel = $row.find('td:first-child, th:first-child').text().toLowerCase();
 
@@ -129,12 +129,12 @@ function parseTableResults(
 
         if (prizeType) {
             // Get all prize values from this row
-            const prizeValues = $row.find('td:not(:first-child) span, td:not(:first-child)').map((i, el) => {
+            const prizeValues = $row.find('td:not(:first-child) span, td:not(:first-child)').map((i: number, el: any) => {
                 const text = $(el).text().trim().replace(/\D/g, '');
                 return text.length >= 2 ? text : null;
             }).get().filter(Boolean);
 
-            prizeValues.forEach((value, order) => {
+            prizeValues.forEach((value: string, order: number) => {
                 if (value) {
                     results.push({
                         station_code: stationCode,
@@ -154,11 +154,11 @@ function parseTableResults(
 /**
  * Parse lottery results from minhngoc.net HTML structure (fallback)
  */
-function parseMinhNgoc($: cheerio.CheerioAPI, stationCode: string, drawDate: string): LotteryResult[] {
+function parseMinhNgoc($: any, stationCode: string, drawDate: string): LotteryResult[] {
     const results: LotteryResult[] = [];
 
     // minhngoc uses different structure - adapt as needed
-    $('table.bkqmiennam tr, .box_kqxs tr').each((_, row) => {
+    $('table.bkqmiennam tr, .box_kqxs tr').each((_: number, row: any) => {
         const $row = $(row);
         const cells = $row.find('td');
 
@@ -180,8 +180,8 @@ function parseMinhNgoc($: cheerio.CheerioAPI, stationCode: string, drawDate: str
             else if (labelCell.includes('g.8') || labelCell.includes('tám')) prizeType = 'eighth';
 
             if (prizeType) {
-                const values = valueCell.text().split(/[-–,\s]+/).map(v => v.trim().replace(/\D/g, '')).filter(v => v.length >= 2);
-                values.forEach((value, order) => {
+                const values = valueCell.text().split(/[-–,\s]+/).map((v: string) => v.trim().replace(/\D/g, '')).filter((v: string) => v.length >= 2);
+                values.forEach((value: string, order: number) => {
                     results.push({
                         station_code: stationCode,
                         draw_date: drawDate,
