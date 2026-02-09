@@ -31,6 +31,7 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
 
 const SCRAPE_TIMEOUT_MS = 15000;
@@ -42,54 +43,45 @@ function normalizeString(str: string): string {
 
 /**
  * Check xem header của bảng (tableHeader) có khớp với mã đài (stationCode) không
- * Dựa vào STATION_MAP
  */
 function isStationMatch(tableHeader: string, stationCode: string): boolean {
     const normalizedHeader = normalizeString(tableHeader);
-    // 1. Clean code từ DB (vd: tphcm1 -> tphcm)
     const cleanCode = stationCode.replace(/\d+$/, '');
-
-    // 2. Lấy danh sách từ khóa cho đài này
     const keywords = STATION_MAP[cleanCode] || [cleanCode];
-
-    // 3. So sánh
     return keywords.some(kw => normalizedHeader.includes(normalizeString(kw)));
 }
 
 async function fetchWithRotation(url: string): Promise<string> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000); // 10s fetch timeout
-
     try {
         const response = await fetch(url, {
-            signal: controller.signal,
             headers: {
                 'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Referer': 'https://www.google.com/',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
             },
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return await response.text();
-    } finally {
-        clearTimeout(timeout);
+        return response.text();
+    } catch (error: any) {
+        console.warn(`Fetch error: ${error.message}`);
+        throw error;
     }
 }
 
 /**
- * Hàm parse dùng 'any' để tránh lỗi Type Cheerio
+ * DÙNG 'any' ĐỂ TRÁNH LỖI BUILD
  */
-function parseGenericTable($: any, table: any, stationCode: string, drawDate: string): LotteryResult[] {
+function parseGenericTable(
+    $: any,
+    table: any,
+    stationCode: string,
+    drawDate: string
+): LotteryResult[] {
     const results: LotteryResult[] = [];
 
     table.find('tr').each((_: any, row: any) => {
         const $row = $(row);
         const prizeLabel = normalizeString($row.find('td:first-child, th:first-child').text());
 
-        // Mapping giải
         let prizeType: string | null = null;
         if (prizeLabel.match(/db|dac\s*biet/)) prizeType = 'special';
         else if (prizeLabel.match(/nhat|g1/)) prizeType = 'first';
@@ -106,7 +98,6 @@ function parseGenericTable($: any, table: any, stationCode: string, drawDate: st
             $row.find('td').each((idx: number, cell: any) => {
                 if (idx === 0) return;
                 const text = $(cell).text();
-                // Regex lấy số: bỏ hết ký tự không phải số
                 const nums = text.split(/[\s\-\.]+/);
                 nums.forEach((n: string) => {
                     const clean = n.replace(/\D/g, '');
@@ -131,10 +122,8 @@ function parseGenericTable($: any, table: any, stationCode: string, drawDate: st
 function parseXosoMe($: any, stationCode: string, drawDate: string): LotteryResult[] {
     let targetTable: any = null;
 
-    // Duyệt qua tất cả bảng
     $('table.kqxs, .box_kqxs').each((_: any, tbl: any) => {
         const $tbl = $(tbl);
-        // Lấy text header để nhận diện đài
         const headerText = $tbl.find('th').text() + ' ' + $tbl.prev().text() + ' ' + $tbl.attr('data-station');
 
         if (isStationMatch(headerText, stationCode)) {
@@ -168,56 +157,42 @@ function parseMinhNgoc($: any, stationCode: string, drawDate: string): LotteryRe
     return [];
 }
 
-// Hàm Main
+function createTimeout(ms: number): Promise<never> {
+    return new Promise((_, reject) => {
+        setTimeout(() => reject({ code: ERROR_CODES.SCRAPE_TIMEOUT }), ms);
+    });
+}
+
 export async function scrapeLotteryResults(stationCode: string, drawDate: string): Promise<LotteryResult[]> {
     const [year, month, day] = drawDate.split('-');
     const formattedDate = `${day}-${month}-${year}`;
 
-    // 1. Thử Xoso.me
+    // 1. Try Xoso.me
     try {
-        const url = `https://xoso.me/xsmn-${formattedDate}.html`;
-        console.log(`[Scraper] Fetching: ${url}`);
-        const html = await fetchWithRotation(url);
+        const html = await fetchWithRotation(SOURCES.primary(formattedDate));
         const $ = cheerio.load(html);
         const results = parseXosoMe($, stationCode, drawDate);
         if (results.length > 0) return results;
-        console.log(`[Scraper] Xoso.me returned 0 results for ${stationCode}`);
-    } catch (e: any) {
-        console.warn('[Scraper] Xoso.me failed:', e.message);
+    } catch (e) {
+        // Silent fail
     }
 
-    // 2. Thử MinhNgoc
+    // 2. Try MinhNgoc
     try {
-        const url = `https://www.minhngoc.net.vn/ket-qua-xo-so/mien-nam/${formattedDate}.html`;
-        console.log(`[Scraper] Fetching fallback: ${url}`);
-        const html = await fetchWithRotation(url);
+        const html = await fetchWithRotation(SOURCES.fallback(formattedDate));
         const $ = cheerio.load(html);
         const results = parseMinhNgoc($, stationCode, drawDate);
         if (results.length > 0) return results;
-        console.log(`[Scraper] MinhNgoc returned 0 results for ${stationCode}`);
-    } catch (e: any) {
-        console.warn('[Scraper] MinhNgoc failed:', e.message);
+    } catch (e) {
+        console.warn('Fallback failed:', e);
     }
 
-    // Nếu cả 2 đều không có kết quả -> Throw để API trả về 503
     throw { code: ERROR_CODES.SCRAPE_FAILED };
 }
 
 export async function scrapeWithTimeout(stationCode: string, drawDate: string): Promise<LotteryResult[]> {
-    return new Promise((resolve, reject) => {
-        // Timeout cứng 15s
-        const timer = setTimeout(() => {
-            reject({ code: ERROR_CODES.SCRAPE_TIMEOUT });
-        }, SCRAPE_TIMEOUT_MS);
-
-        scrapeLotteryResults(stationCode, drawDate)
-            .then(res => {
-                clearTimeout(timer);
-                resolve(res);
-            })
-            .catch(err => {
-                clearTimeout(timer);
-                reject(err);
-            });
-    });
+    return Promise.race([
+        scrapeLotteryResults(stationCode, drawDate),
+        createTimeout(SCRAPE_TIMEOUT_MS),
+    ]);
 }
